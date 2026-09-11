@@ -1,7 +1,8 @@
 "use client";
 
 import Image from "next/image";
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useRef, useState } from "react";
+import { useReducedMotion } from "@/lib/use-reduced-motion";
 
 /** Video is 3.6s (see CLAUDE.md); used only if `loadedmetadata` never fires. */
 const FALLBACK_DURATION_MS = 3600;
@@ -12,29 +13,16 @@ const CLOSE_MS = 500;
 const AUDIO_VOLUME = 0.35;
 const AUDIO_RAMP_MS = 1500;
 
-const REDUCED_MOTION_QUERY = "(prefers-reduced-motion: reduce)";
-
-function subscribeToReducedMotion(onChange: () => void) {
-  const media = window.matchMedia(REDUCED_MOTION_QUERY);
-  media.addEventListener("change", onChange);
-  return () => media.removeEventListener("change", onChange);
-}
-
-function getReducedMotionSnapshot() {
-  return window.matchMedia(REDUCED_MOTION_QUERY).matches;
-}
-
-function getReducedMotionServerSnapshot() {
-  return false;
-}
-
 /** Ramps an already-playing element's volume from its current value to `to`. */
 function rampVolume(media: HTMLMediaElement, to: number, durationMs: number) {
   const from = media.volume;
   const start = performance.now();
 
   function step(now: number) {
-    const t = Math.min(1, (now - start) / durationMs);
+    // Clamp both ends: a rAF timestamp can land a hair before `start`
+    // (they aren't guaranteed to share an origin instant), which without
+    // the lower clamp produces a barely-negative volume and throws.
+    const t = Math.min(1, Math.max(0, (now - start) / durationMs));
     media.volume = from + (to - from) * t;
     if (t < 1) requestAnimationFrame(step);
   }
@@ -81,14 +69,14 @@ function SpeakerOffIcon() {
   );
 }
 
-export default function EnvelopeGate() {
-  // Subscribing (rather than reading matchMedia in an effect + setState)
-  // keeps this in sync with the platform without a cascading render.
-  const prefersReducedMotion = useSyncExternalStore(
-    subscribeToReducedMotion,
-    getReducedMotionSnapshot,
-    getReducedMotionServerSnapshot,
-  );
+export default function EnvelopeGate({
+  onClosed,
+}: {
+  /** Fired once the gate is fully out of the way — the cue for whatever
+   * sits underneath (the door reveal, in hero.tsx) to start. */
+  onClosed?: () => void;
+}) {
+  const prefersReducedMotion = useReducedMotion();
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
@@ -104,6 +92,17 @@ export default function EnvelopeGate() {
   const [closing, setClosing] = useState(false);
   const [muted, setMuted] = useState(false);
 
+  const close = () => {
+    if (closedRef.current) return;
+    closedRef.current = true;
+    if (fallbackTimerRef.current) clearTimeout(fallbackTimerRef.current);
+    setClosing(true);
+    setTimeout(() => {
+      setOverlayVisible(false);
+      onClosed?.();
+    }, CLOSE_MS);
+  };
+
   useEffect(() => {
     if (prefersReducedMotion || !overlayVisible) return;
 
@@ -116,19 +115,20 @@ export default function EnvelopeGate() {
     };
   }, [prefersReducedMotion, overlayVisible]);
 
+  // There's no tap gesture to skip to under reduced motion (the overlay
+  // never renders), so fire the "closed" signal immediately instead of
+  // waiting on a gesture that will never come — otherwise whatever's
+  // gated on it (the door reveal, the names) would stay hidden forever.
+  useEffect(() => {
+    if (prefersReducedMotion) close();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefersReducedMotion]);
+
   useEffect(() => {
     return () => {
       if (fallbackTimerRef.current) clearTimeout(fallbackTimerRef.current);
     };
   }, []);
-
-  const close = () => {
-    if (closedRef.current) return;
-    closedRef.current = true;
-    if (fallbackTimerRef.current) clearTimeout(fallbackTimerRef.current);
-    setClosing(true);
-    setTimeout(() => setOverlayVisible(false), CLOSE_MS);
-  };
 
   const activate = () => {
     if (opened) return;
@@ -191,7 +191,7 @@ export default function EnvelopeGate() {
           }`}
         >
           <Image
-            src="/initial-screen/initial-page.png"
+            src="/initial-screen/envelope.jpg"
             alt=""
             aria-hidden="true"
             fill
@@ -218,25 +218,6 @@ export default function EnvelopeGate() {
               opened ? "opacity-100" : "opacity-0"
             }`}
           />
-
-          <div
-            aria-hidden="true"
-            className={`pointer-events-none absolute top-[45%] left-1/2 h-16 w-16 -translate-x-1/2 -translate-y-1/2 transition-opacity duration-200 ${
-              opened ? "opacity-0" : "opacity-100"
-            }`}
-          >
-            <span className="absolute inset-0 animate-ping rounded-full bg-gold/40" />
-            <span className="absolute inset-0 rounded-full border border-gold/70" />
-          </div>
-
-          <p
-            aria-hidden="true"
-            className={`pointer-events-none absolute inset-x-0 bottom-[8%] text-center text-xs uppercase tracking-[0.3em] text-ink/80 transition-opacity duration-200 ${
-              opened ? "opacity-0" : "opacity-100"
-            }`}
-          >
-            Tap to open
-          </p>
         </div>
       )}
 
@@ -246,8 +227,10 @@ export default function EnvelopeGate() {
         <button
           type="button"
           onClick={toggleMute}
-          aria-label={muted ? "Unmute background music" : "Mute background music"}
-          className="fixed top-[max(1rem,env(safe-area-inset-top))] right-4 z-40 text-navy/50 transition-colors hover:text-navy/80 focus-visible:text-navy/80 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-gold/60"
+          aria-label={
+            muted ? "Unmute background music" : "Mute background music"
+          }
+          className="fixed top-[max(1rem,env(safe-area-inset-top))] right-4 z-40 text-hero-ink/50 transition-colors hover:text-hero-ink/80 focus-visible:text-hero-ink/80 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-gold/60"
         >
           {muted ? <SpeakerOffIcon /> : <SpeakerIcon />}
         </button>
